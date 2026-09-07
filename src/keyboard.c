@@ -72,8 +72,9 @@ void keyboard_irq(void) {
 }
 
 int keyboard_get(void) {
+    sti();
     while (buf_head == buf_tail) {
-        __asm__ volatile("sti; hlt; cli");
+        __asm__ volatile("hlt");
     }
     int c = buf[buf_tail];
     buf_tail = (buf_tail + 1) % BUFSZ;

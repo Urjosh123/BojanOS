@@ -55,9 +55,8 @@ static int selftest(void) {
 
     char line[1024];
     char* lp;
-    int rc;
 
-    rc = shell_exec_line(lp = strcpy(line, "echo hello > /tmp/echo.txt"));
+    shell_exec_line(lp = strcpy(line, "echo hello > /tmp/echo.txt"));
     (void)lp;
     vnode_t* e = vfs_resolve("/tmp/echo.txt");
     CHECK(e && e->size == 6 && memcmp(e->data, "hello\n", 6) == 0, "redirect write");

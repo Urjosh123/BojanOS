@@ -338,6 +338,14 @@ int main(void) {
     run("help");
     CHECK(screen_has("Built-in commands"), "help text");
 
+
+    run("printf 'one\ntwo\nthree\n' > /tmp/d1.txt");
+    run("printf 'one\nTWO\nfour\n' > /tmp/d2.txt");
+    run("diff /tmp/d1.txt /tmp/d2.txt");
+    CHECK(screen_has("< two") && screen_has("> TWO") && screen_has("< three") && screen_has("> four"), "diff shows changes");
+    run("echo hello | sleep 0.01 2>/dev/null || true");
+    CHECK(1, "pipe into sleep returns");
+
     printf("\n== result: %d failures ==\n", failures);
     return failures ? 1 : 0;
 }

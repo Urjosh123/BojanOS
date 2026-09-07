@@ -14,8 +14,6 @@ static int out_append;
 static vnode_t* in_file;
 static size_t in_off;
 
-static char* pipe_in;
-static size_t pipe_in_len;
 static size_t pipe_in_off;
 
 typedef struct {
@@ -64,17 +62,6 @@ void sh_write(const char* s, size_t n) {
 
 void sh_puts(const char* s) {
     while (*s) out_raw(*s++);
-}
-
-static void sh_print_dec(int64_t v) {
-    char b[24];
-    int i = 0;
-    int neg = v < 0;
-    uint64_t u = neg ? (uint64_t)(-v) : (uint64_t)v;
-    if (!u) b[i++] = '0';
-    while (u) { b[i++] = '0' + u % 10; u /= 10; }
-    if (neg) b[i++] = '-';
-    while (i--) out_raw(b[i]);
 }
 
 static void sh_print_hex(uint64_t v) {

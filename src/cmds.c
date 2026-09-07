@@ -460,32 +460,30 @@ static int cmd_diff(args_t* a) {
         }
     }
     if (d[0] == 0) { sh_puts("Files are identical\n"); return 0; }
-    int i = 0, j = 0;
-    int diffs = 0;
-    while (i < na || j < nb) {
-        if (i < na && j < nb && strcmp(la[i], lb[j]) == 0) { i++; j++; continue; }
-        int fromI = i, fromJ = j;
-        int dels = 0, inss = 0;
-        while (i < na && (j >= nb || d[i * (nb + 1) + j] != d[(i + 1) * (nb + 1) + j] - 1 ? 0 : 1)) {
-            if (i < na && j < nb && strcmp(la[i], lb[j]) == 0) break;
-            i++; dels++;
-            if (i >= na) break;
-            if (j < nb && d[i * (nb + 1) + j] == d[(i + 1) * (nb + 1) + (j)] - 1) continue;
-            break;
+    {
+        int i = 0, j = 0;
+        while (i < na || j < nb) {
+            if (i < na && j < nb && strcmp(la[i], lb[j]) == 0) {
+                i++; j++;
+            } else if (j < nb && (i >= na || d[i * (nb + 1) + j] == d[i * (nb + 1) + (j + 1)] + 1)) {
+                sh_printf("> %s\n", lb[j]);
+                j++;
+            } else if (i < na && (j >= nb || d[i * (nb + 1) + j] == d[(i + 1) * (nb + 1) + j] + 1)) {
+                sh_printf("< %s\n", la[i]);
+                i++;
+            } else if (i < na && j < nb) {
+                sh_printf("< %s\n", la[i]);
+                sh_printf("> %s\n", lb[j]);
+                i++; j++;
+            } else if (i < na) {
+                sh_printf("< %s\n", la[i]);
+                i++;
+            } else if (j < nb) {
+                sh_printf("> %s\n", lb[j]);
+                j++;
+            }
         }
-        i = fromI;
-        while (j < nb) {
-            if (i < na && strcmp(la[i], lb[j]) == 0) break;
-            if (i < na && d[i * (nb + 1) + j] == d[i * (nb + 1) + (j + 1)] - 1) { j++; inss++; continue; }
-            if (i < na && d[i * (nb + 1) + j] == d[(i + 1) * (nb + 1) + (j + 1)] + 0) { i++; j++; continue; }
-            if (i < na && d[i * (nb + 1) + j] == d[(i + 1) * (nb + 1) + j] + 0) { i++; continue; }
-            break;
-        }
-        (void)fromI; (void)fromJ; (void)dels; (void)inss;
-        diffs++;
-        if (diffs > 1000) break;
     }
-    sh_printf("Files differ (%u edits)\n", (unsigned)d[0]);
     return 1;
 }
 
@@ -518,18 +516,6 @@ static int cmd_mv(args_t* a) {
     int rc = cmd_cp(a);
     if (rc) return rc;
     if (!vfs_rm(a->argv[1])) { sh_printf("mv: cannot remove %s\n", a->argv[1]); return 1; }
-    return 0;
-}
-
-static int cmd_write_file(args_t* a, int append) {
-    if (a->argc < 2) { sh_puts("write: missing file\n"); return 1; }
-    vnode_t* n = vfs_resolve(a->argv[1]);
-    if (!n) { vfs_mkfile(a->argv[1]); n = vfs_resolve(a->argv[1]); }
-    if (!n || n->type != FS_TYPE_FILE) { sh_printf("cannot open %s\n", a->argv[1]); return 1; }
-    if (!append) vfs_truncate(n);
-    size_t len;
-    char* d = read_all_stdin(&len);
-    if (d && len) vfs_append_file(n, d, len);
     return 0;
 }
 

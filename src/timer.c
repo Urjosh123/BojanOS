@@ -1,5 +1,6 @@
 #include "timer.h"
 #include "io.h"
+#include <stdint.h>
 
 static volatile uint64_t ticks;
 
@@ -20,6 +21,7 @@ uint64_t timer_uptime_ms(void) { return ticks * 10; }
 
 void sleep_ms(uint64_t ms) {
     uint64_t target = timer_uptime_ms() + ms;
+    sti();
     while (timer_uptime_ms() < target) {
         __asm__ volatile("hlt");
     }
