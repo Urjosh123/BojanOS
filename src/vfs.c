@@ -1,221 +1,265 @@
 #include "vfs.h"
+#include "kheap.h"
 #include "string.h"
-#include "vga.h"
 
-fs_dir fs_root;
-fs_dir* fs_current;
-char fs_path[256];
+vnode_t* vfs_root;
+vnode_t* vfs_cwd;
+char vfs_pwd[1024];
 
-static fs_file* find_file_in_dir(fs_dir* dir, const char* name) {
-    for (int i = 0; i < dir->file_count; i++) {
-        if (dir->files[i].used && strcmp(dir->files[i].name, name) == 0)
-            return &dir->files[i];
+static vnode_t* make_node(int type, const char* name, vnode_t* parent) {
+    vnode_t* n = kzalloc(sizeof(vnode_t));
+    if (!n) return 0;
+    n->type = type;
+    n->parent = parent;
+    strncpy(n->name, name, VFS_NAME_MAX - 1);
+    n->children = 0;
+    n->child_count = 0;
+    n->child_cap = 0;
+    n->data = 0;
+    n->size = 0;
+    n->cap = 0;
+    return n;
+}
+
+static vnode_t* child_of(vnode_t* dir, const char* name) {
+    if (!dir || dir->type != FS_TYPE_DIR) return 0;
+    for (int i = 0; i < dir->child_count; i++) {
+        if (strcmp(dir->children[i]->name, name) == 0) return dir->children[i];
     }
     return 0;
 }
 
-static fs_dir* find_dir_in_dir(fs_dir* dir, const char* name) {
-    for (int i = 0; i < dir->subdir_count; i++) {
-        if (dir->subdirs[i] && dir->subdirs[i]->used && strcmp(dir->subdirs[i]->name, name) == 0)
-            return dir->subdirs[i];
+static int add_child(vnode_t* dir, vnode_t* child) {
+    if (dir->child_count >= dir->child_cap) {
+        int newcap = dir->child_cap ? dir->child_cap * 2 : 8;
+        vnode_t** nc = kmalloc(newcap * sizeof(vnode_t*));
+        if (!nc) return 0;
+        for (int i = 0; i < dir->child_count; i++) nc[i] = dir->children[i];
+        dir->children = nc;
+        dir->child_cap = newcap;
+    }
+    dir->children[dir->child_count++] = child;
+    return 1;
+}
+
+int vfs_is_abs(const char* p) { return p[0] == '/'; }
+
+const char* vfs_basename(const char* path) {
+    const char* b = path;
+    for (const char* p = path; *p; p++)
+        if (*p == '/') b = p + 1;
+    return b;
+}
+
+vnode_t* vfs_resolve(const char* path) {
+    if (!path || !path[0]) return vfs_cwd;
+    vnode_t* cur = path[0] == '/' ? vfs_root : vfs_cwd;
+    const char* p = path;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char name[VFS_NAME_MAX];
+        int i = 0;
+        while (*p && *p != '/') {
+            if (i < VFS_NAME_MAX - 1) name[i++] = *p;
+            p++;
+        }
+        name[i] = 0;
+        if (strcmp(name, ".") == 0) continue;
+        if (strcmp(name, "..") == 0) {
+            if (cur->parent) cur = cur->parent;
+            continue;
+        }
+        if (strcmp(name, "~") == 0) {
+            vnode_t* home = child_of(vfs_root, "root");
+            if (!home) return 0;
+            cur = home;
+            continue;
+        }
+        vnode_t* c = child_of(cur, name);
+        if (!c) return 0;
+        cur = c;
+    }
+    return cur;
+}
+
+vnode_t* vfs_resolve_parent(const char* path, char* out_name) {
+    char buf[1024];
+    strncpy(buf, path, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    char* slash = strrchr(buf, '/');
+    if (!slash) {
+        if (out_name) strcpy(out_name, buf);
+        return vfs_cwd;
+    }
+    const char* name = slash + 1;
+    if (out_name) strcpy(out_name, name[0] ? name : "/");
+    if (slash == buf) return vfs_root;
+    *slash = 0;
+    return vfs_resolve(buf[0] ? buf : "/");
+}
+
+int vfs_write_file(vnode_t* n, const char* data, size_t len) {
+    if (!n || n->type != FS_TYPE_FILE) return 0;
+    if (len + 1 > n->cap) {
+        size_t nc = n->cap ? n->cap : 64;
+        while (nc <= len) nc *= 2;
+        char* nd = kmalloc(nc);
+        if (!nd) return 0;
+        if (n->data && n->size) memcpy(nd, n->data, n->size);
+        n->data = nd;
+        n->cap = nc;
+    }
+    memcpy(n->data, data, len);
+    n->size = len;
+    n->data[len] = 0;
+    return 1;
+}
+
+int vfs_append_file(vnode_t* n, const char* data, size_t len) {
+    if (!n || n->type != FS_TYPE_FILE) return 0;
+    size_t need = n->size + len + 1;
+    if (need > n->cap) {
+        size_t nc = n->cap ? n->cap : 64;
+        while (nc < need) nc *= 2;
+        char* nd = kmalloc(nc);
+        if (!nd) return 0;
+        if (n->data && n->size) memcpy(nd, n->data, n->size);
+        n->data = nd;
+        n->cap = nc;
+    }
+    memcpy(n->data + n->size, data, len);
+    n->size += len;
+    n->data[n->size] = 0;
+    return 1;
+}
+
+void vfs_truncate(vnode_t* n) {
+    if (n && n->type == FS_TYPE_FILE) {
+        n->size = 0;
+        if (n->data) n->data[0] = 0;
+    }
+}
+
+int vfs_mkfile(const char* path) {
+    char name[VFS_NAME_MAX];
+    vnode_t* parent = vfs_resolve_parent(path, name);
+    if (!parent || parent->type != FS_TYPE_DIR) return 0;
+    if (!name[0] || child_of(parent, name)) return 0;
+    vnode_t* n = make_node(FS_TYPE_FILE, name, parent);
+    if (!n) return 0;
+    return add_child(parent, n);
+}
+
+int vfs_mkdir(const char* path) {
+    char name[VFS_NAME_MAX];
+    vnode_t* parent = vfs_resolve_parent(path, name);
+    if (!parent || parent->type != FS_TYPE_DIR) return 0;
+    if (!name[0] || child_of(parent, name)) return 0;
+    vnode_t* n = make_node(FS_TYPE_DIR, name, parent);
+    if (!n) return 0;
+    return add_child(parent, n);
+}
+
+int vfs_rm(const char* path) {
+    vnode_t* n = vfs_resolve(path);
+    if (!n || n == vfs_root || !n->parent) return 0;
+    if (n->type == FS_TYPE_DIR && n->child_count > 0) return 0;
+    return vfs_unlink_node(n);
+}
+
+int vfs_unlink_node(vnode_t* n) {
+    if (!n || n == vfs_root || !n->parent) return 0;
+    vnode_t* p = n->parent;
+    for (int i = 0; i < p->child_count; i++) {
+        if (p->children[i] == n) {
+            for (int j = i; j < p->child_count - 1; j++)
+                p->children[j] = p->children[j + 1];
+            p->child_count--;
+            return 1;
+        }
     }
     return 0;
 }
 
-void fs_init(void) {
-    memset(&fs_root, 0, sizeof(fs_root));
-    strcpy(fs_root.name, "");
-    fs_root.used = 1;
-    fs_root.parent = &fs_root;
-    fs_current = &fs_root;
-    strcpy(fs_path, "/");
-}
-
-int fs_mkfile(fs_dir* dir, const char* name) {
-    if (find_file_in_dir(dir, name) || find_dir_in_dir(dir, name)) return 0;
-    if (dir->file_count >= FS_MAX_FILES) return 0;
-    fs_file* f = &dir->files[dir->file_count++];
-    f->used = 1;
-    strcpy(f->name, name);
-    f->size = 0;
-    f->content[0] = 0;
-    return 1;
-}
-
-int fs_rmfile(fs_dir* dir, const char* name) {
-    fs_file* f = find_file_in_dir(dir, name);
-    if (!f) return 0;
-    f->used = 0;
-    return 1;
-}
-
-char* fs_cat(fs_dir* dir, const char* name) {
-    fs_file* f = find_file_in_dir(dir, name);
-    if (!f) return 0;
-    return f->content;
-}
-
-int fs_write(fs_dir* dir, const char* name, const char* data) {
-    fs_file* f = find_file_in_dir(dir, name);
-    if (!f) {
-        if (!fs_mkfile(dir, name)) return 0;
-        f = find_file_in_dir(dir, name);
+int vfs_rm_recursive_node(vnode_t* n) {
+    if (!n || n == vfs_root) return 0;
+    while (n->child_count > 0) {
+        if (!vfs_rm_recursive_node(n->children[n->child_count - 1])) return 0;
     }
-    int len = 0;
-    while (data[len] && len < FS_MAX_CONTENT - 1) len++;
-    if (len >= FS_MAX_CONTENT) len = FS_MAX_CONTENT - 1;
-    for (int i = 0; i < len; i++) f->content[i] = data[i];
-    f->content[len] = 0;
-    f->size = len;
-    return 1;
+    return vfs_unlink_node(n);
 }
 
-int fs_append(fs_dir* dir, const char* name, const char* data) {
-    fs_file* f = find_file_in_dir(dir, name);
-    if (!f) return 0;
-    int dlen = 0;
-    while (data[dlen]) dlen++;
-    if (f->size + dlen >= FS_MAX_CONTENT - 1)
-        dlen = FS_MAX_CONTENT - 1 - f->size;
-    for (int i = 0; i < dlen; i++)
-        f->content[f->size + i] = data[i];
-    f->content[f->size + dlen] = 0;
-    f->size += dlen;
-    return 1;
+int vfs_rm_recursive(const char* path) {
+    vnode_t* n = vfs_resolve(path);
+    if (!n || n == vfs_root) return 0;
+    return vfs_rm_recursive_node(n);
 }
 
-fs_file* fs_find_file(fs_dir* dir, const char* name) {
-    return find_file_in_dir(dir, name);
+static vnode_t* mkdir_simple(vnode_t* parent, const char* name) {
+    vnode_t* n = make_node(FS_TYPE_DIR, name, parent);
+    if (n) add_child(parent, n);
+    return n;
 }
 
-fs_dir* fs_find_dir(fs_dir* dir, const char* name) {
-    return find_dir_in_dir(dir, name);
+static vnode_t* mkfile_simple(vnode_t* parent, const char* name, const char* content) {
+    vnode_t* n = make_node(FS_TYPE_FILE, name, parent);
+    if (!n) return 0;
+    add_child(parent, n);
+    if (content) vfs_write_file(n, content, strlen(content));
+    return n;
 }
 
-int fs_mkdir(fs_dir* dir, const char* name) {
-    if (find_file_in_dir(dir, name) || find_dir_in_dir(dir, name)) return 0;
-    if (dir->subdir_count >= FS_MAX_DIRS) return 0;
-    static fs_dir pool[FS_MAX_DIRS];
-    static int pool_idx = 0;
-    if (pool_idx >= FS_MAX_DIRS) return 0;
-    fs_dir* d = &pool[pool_idx++];
-    memset(d, 0, sizeof(fs_dir));
-    d->used = 1;
-    strcpy(d->name, name);
-    d->parent = dir;
-    dir->subdirs[dir->subdir_count++] = d;
-    return 1;
-}
-
-int fs_rmdir(fs_dir* dir, const char* name) {
-    fs_dir* d = find_dir_in_dir(dir, name);
-    if (!d || d->file_count > 0 || d->subdir_count > 0) return 0;
-    d->used = 0;
-    return 1;
-}
-
-void fs_pwd(void) {
-    vga_print(fs_path);
-}
-
-int fs_cd(const char* path) {
-    if (strcmp(path, "/") == 0 || strcmp(path, "~") == 0) {
-        fs_current = &fs_root;
-        strcpy(fs_path, "/");
-        return 1;
+void vfs_update_pwd(void) {
+    if (vfs_cwd == vfs_root) {
+        strcpy(vfs_pwd, "/");
+        return;
     }
-    if (strcmp(path, "..") == 0) {
-        if (fs_current != &fs_root) {
-            fs_current = fs_current->parent;
-            int len = 0;
-            while (fs_path[len]) len++;
-            if (len > 1) {
-                len--;
-                while (len > 0 && fs_path[len] != '/') len--;
-                if (len == 0) fs_path[1] = 0;
-                else fs_path[len] = 0;
-            }
-        }
-        return 1;
+    char* names[64];
+    int depth = 0;
+    vnode_t* n = vfs_cwd;
+    while (n && n != vfs_root && depth < 64) {
+        names[depth++] = n->name;
+        n = n->parent;
     }
-    fs_dir* d = find_dir_in_dir(fs_current, path);
-    if (!d) return 0;
-    fs_current = d;
-    int plen = 0;
-    while (fs_path[plen]) plen++;
-    if (plen > 1) {
-        fs_path[plen] = '/';
-        plen++;
+    char buf[1024];
+    buf[0] = 0;
+    for (int i = depth - 1; i >= 0; i--) {
+        strcat(buf, "/");
+        strcat(buf, names[i]);
     }
-    int nlen = 0;
-    while (path[nlen] && plen < 255) {
-        fs_path[plen] = path[nlen];
-        plen++;
-        nlen++;
-    }
-    fs_path[plen] = 0;
-    return 1;
+    if (!buf[0]) strcpy(buf, "/");
+    strcpy(vfs_pwd, buf);
 }
 
-void fs_ls(fs_dir* dir) {
-    for (int i = 0; i < dir->subdir_count; i++) {
-        if (dir->subdirs[i] && dir->subdirs[i]->used) {
-            vga_print(dir->subdirs[i]->name);
-            vga_print("/\n");
-        }
-    }
-    for (int i = 0; i < dir->file_count; i++) {
-        if (dir->files[i].used) {
-            vga_print(dir->files[i].name);
-            vga_putchar('\n');
-        }
-    }
-}
+void vfs_init(void) {
+    vfs_root = make_node(FS_TYPE_DIR, "", 0);
+    vfs_root->parent = vfs_root;
+    vfs_cwd = vfs_root;
 
-void fs_ll(fs_dir* dir) {
-    for (int i = 0; i < dir->subdir_count; i++) {
-        if (dir->subdirs[i] && dir->subdirs[i]->used) {
-            vga_print("drwxr-xr-x root root 4096 09/05/2026 ");
-            vga_print(dir->subdirs[i]->name);
-            vga_print("/\n");
-        }
-    }
-    for (int i = 0; i < dir->file_count; i++) {
-        if (dir->files[i].used) {
-            vga_print("-rw-r--r-- root root ");
-            char buf[16];
-            int n = dir->files[i].size;
-            int j = 0;
-            if (n == 0) {
-                buf[j++] = '0';
-            } else {
-                char t[16];
-                int k = 0;
-                while (n > 0) { t[k++] = '0' + (n % 10); n /= 10; }
-                while (k-- > 0) buf[j++] = t[k];
-            }
-            buf[j] = 0;
-            vga_print(buf);
-            vga_print(" 09/05/2026 ");
-            vga_print(dir->files[i].name);
-            vga_putchar('\n');
-        }
-    }
-}
+    vnode_t* bin = mkdir_simple(vfs_root, "bin");
+    vnode_t* etc = mkdir_simple(vfs_root, "etc");
+    vnode_t* home = mkdir_simple(vfs_root, "home");
+    vnode_t* root = mkdir_simple(vfs_root, "root");
+    vnode_t* tmp = mkdir_simple(vfs_root, "tmp");
+    vnode_t* usr = mkdir_simple(vfs_root, "usr");
+    mkdir_simple(usr, "bin");
+    mkdir_simple(home, "user");
 
-int fs_cp(fs_dir* src_dir, const char* src, fs_dir* dst_dir, const char* dst) {
-    fs_file* sf = find_file_in_dir(src_dir, src);
-    if (!sf) return 0;
-    if (!fs_mkfile(dst_dir, dst)) return 0;
-    fs_file* df = find_file_in_dir(dst_dir, dst);
-    if (!df) return 0;
-    for (int i = 0; i <= sf->size && i < FS_MAX_CONTENT; i++)
-        df->content[i] = sf->content[i];
-    df->size = sf->size;
-    return 1;
-}
+    mkfile_simple(etc, "motd", "Welcome to BojanOS - a from-scratch 64-bit operating system\n");
+    mkfile_simple(etc, "hostname", "bojanos\n");
+    mkfile_simple(etc, "os-release", "NAME=BojanOS\nVERSION=1.0\nID=bojanos\nPRETTY_NAME=\"BojanOS 1.0\"\n");
+    mkfile_simple(root, "readme.txt",
+        "BojanOS\n"
+        "=======\n"
+        "Everything you see was written from scratch for this OS:\n"
+        " - 64-bit long mode kernel with paging, GDT, IDT, IRQs\n"
+        " - PS/2 keyboard driver, PIT timer, CMOS RTC\n"
+        " - in-RAM filesystem with directories and files\n"
+        " - shell with pipes and redirections\n"
+        "Type 'help' to list commands.\n");
 
-int fs_mv(fs_dir* src_dir, const char* src, fs_dir* dst_dir, const char* dst) {
-    if (!fs_cp(src_dir, src, dst_dir, dst)) return 0;
-    return fs_rmfile(src_dir, src);
+    vfs_cwd = root;
+    vfs_update_pwd();
+    (void)bin; (void)tmp;
 }

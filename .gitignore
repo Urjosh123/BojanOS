@@ -1,0 +1,6 @@
+build/
+hbuild/
+BojanOS.elf
+BojanOS.bin
+BojanOS.iso
+*.o
