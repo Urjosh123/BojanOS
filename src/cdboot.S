@@ -28,7 +28,7 @@ e820_done:
     movw %bp, (0x5000)
 
     call enable_a20
-    call enter_unreal
+    call flat_enter
 
     movl kern_lba, %ebp
     movl $0x100000, %ebx
@@ -40,11 +40,8 @@ read_chunk:
     jbe 1f
     movl $32, %ecx
 1:
-    xorw %ax, %ax
-    movw %ax, %ds
-    movw %ax, %es
     movw %cx, dap_count
-    movl $0x70000000, dap_buf
+    movl $0x00007000, dap_buf
     movl %ebp, dap_lba
     movl $0, dap_lba + 4
     movb boot_drive, %dl
@@ -52,15 +49,14 @@ read_chunk:
     movw $dap, %si
     int $0x13
     jc disk_error
+    call flat_refresh
     movzwl dap_count, %eax
-    pushl %eax
     movl %eax, %ecx
     shll $7, %ecx
     movl $0x70000, %esi
     movl %ebx, %edi
     cld
     rep movsl
-    popl %eax
     movzwl dap_count, %edx
     addl %edx, %ebp
     movl %edx, %ecx
@@ -97,35 +93,56 @@ a20_wait_out:
     inb $0x60, %al
     ret
 
-enter_unreal:
+flat_enter:
+    movl %eax, save_eax
     cli
     lgdt gdt32_desc
     movl %cr0, %eax
     orl $1, %eax
     movl %eax, %cr0
-    ljmp $0x08, $unreal_pm
+    ljmp $0x08, $flat_pm
+
+flat_refresh:
+    cli
+    movl %cr0, %eax
+    orl $1, %eax
+    movl %eax, %cr0
+    jmp refresh_pm16
 
 .code32
-unreal_pm:
-    movw $0x10, %ax
-    movw %ax, %ds
-    movw %ax, %es
-    movw %ax, %fs
-    movw %ax, %gs
-    movw %ax, %ss
+flat_pm:
+    movw $0x10, %bx
+    movw %bx, %ds
+    movw %bx, %es
+    movw %bx, %fs
+    movw %bx, %gs
     movl %cr0, %eax
     andl $0xFFFFFFFE, %eax
     movl %eax, %cr0
-    ljmp $0x00, $unreal_rm
+    ljmp $0x00, $flat_rm
+
+refresh_pm:
+    movw $0x10, %bx
+    movw %bx, %ds
+    movw %bx, %es
+    movw %bx, %fs
+    movw %bx, %gs
+    movl %cr0, %eax
+    andl $0xFFFFFFFE, %eax
+    movl %eax, %cr0
+    ljmp $0x00, $refresh_rm
 
 .code16
-unreal_rm:
-    xorw %ax, %ax
-    movw %ax, %ds
-    movw %ax, %es
-    movw %ax, %fs
-    movw %ax, %gs
-    movw %ax, %ss
+refresh_pm16:
+    jmpl $0x08, $refresh_pm
+
+.code16
+flat_rm:
+    movl save_eax, %eax
+    sti
+    ret
+
+refresh_rm:
     sti
     ret
 
@@ -186,6 +203,9 @@ boot_drive:
 
 .align 4
 sectors_left:
+    .long 0
+
+save_eax:
     .long 0
 
 .align 4
