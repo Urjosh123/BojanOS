@@ -1,47 +1,41 @@
 #ifndef VFS_H
 #define VFS_H
+#include <stddef.h>
+#define VFS_NAME_MAX 64
+#define FS_TYPE_FILE 1
+#define FS_TYPE_DIR  2
 
-#define FS_MAX_FILES 16
-#define FS_MAX_DIRS 4
-#define FS_MAX_NAME 48
-#define FS_MAX_CONTENT 512
+typedef struct vnode vnode_t;
+struct vnode {
+    int type;
+    char name[VFS_NAME_MAX];
+    vnode_t* parent;
+    vnode_t** children;
+    int child_count;
+    int child_cap;
+    char* data;
+    size_t size;
+    size_t cap;
+};
 
-typedef struct fs_file {
-    char name[FS_MAX_NAME];
-    char content[FS_MAX_CONTENT];
-    int size;
-    int used;
-} fs_file;
+extern vnode_t* vfs_root;
+extern vnode_t* vfs_cwd;
+extern char vfs_pwd[1024];
 
-typedef struct fs_dir {
-    char name[FS_MAX_NAME];
-    fs_file files[FS_MAX_FILES];
-    int file_count;
-    struct fs_dir* parent;
-    struct fs_dir* subdirs[FS_MAX_DIRS];
-    int subdir_count;
-    int used;
-} fs_dir;
-
-extern fs_dir fs_root;
-extern fs_dir* fs_current;
-extern char fs_path[256];
-
-void fs_init(void);
-int fs_mkfile(fs_dir* dir, const char* name);
-int fs_rmfile(fs_dir* dir, const char* name);
-char* fs_cat(fs_dir* dir, const char* name);
-int fs_write(fs_dir* dir, const char* name, const char* data);
-int fs_append(fs_dir* dir, const char* name, const char* data);
-fs_file* fs_find_file(fs_dir* dir, const char* name);
-fs_dir* fs_find_dir(fs_dir* dir, const char* name);
-int fs_mkdir(fs_dir* dir, const char* name);
-int fs_rmdir(fs_dir* dir, const char* name);
-void fs_pwd(void);
-int fs_cd(const char* path);
-void fs_ls(fs_dir* dir);
-void fs_ll(fs_dir* dir);
-int fs_cp(fs_dir* src_dir, const char* src, fs_dir* dst_dir, const char* dst);
-int fs_mv(fs_dir* src_dir, const char* src, fs_dir* dst_dir, const char* dst);
-
+void vfs_init(void);
+vnode_t* vfs_resolve(const char* path);
+vnode_t* vfs_resolve_parent(const char* path, char* out_name);
+int vfs_mkfile(const char* path);
+int vfs_mkdir(const char* path);
+int vfs_rm(const char* path);
+int vfs_rm_recursive(const char* path);
+int vfs_unlink_node(vnode_t* n);
+int vfs_rm_recursive_node(vnode_t* n);
+int vfs_write_file(vnode_t* n, const char* data, size_t len);
+int vfs_append_file(vnode_t* n, const char* data, size_t len);
+void vfs_truncate(vnode_t* n);
+const char* vfs_basename(const char* path);
+void vfs_update_pwd(void);
+int vfs_is_abs(const char* p);
+char* vfs_join(const char* dir, const char* name);
 #endif
